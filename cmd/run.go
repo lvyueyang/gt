@@ -5,19 +5,23 @@ import (
 	"github.com/duke-git/lancet/v2/slice"
 	"github.com/duke-git/lancet/v2/strutil"
 	"github.com/fsnotify/fsnotify"
+	"github.com/gookit/color"
 	"github.com/spf13/viper"
 	"log"
 	"os"
+	"os/exec"
 	"path"
 	"path/filepath"
-	"sync"
+	"strings"
 	"time"
 
 	"github.com/spf13/cobra"
 )
 
 type Config struct {
-	IgnoreDirs []string
+	IgnoreDirs  []string // 忽略的目录
+	IgnoreFiles []string // 忽略的文件
+	Runs        []string //  需要执行的命令
 }
 
 var (
@@ -25,30 +29,49 @@ var (
 	config      Config
 )
 
+func run() {
+	for _, c := range config.Runs {
+		if c == "" {
+			return
+		}
+		log.Println(color.Blue.Sprint("Run ", c))
+
+		args := strings.Split(c, " ")
+		cmd := exec.Command(args[0], args[1:]...)
+		cmd.Dir = currentPath
+		cmd.Stdout = os.Stdout
+		err := cmd.Run()
+		if err != nil {
+			log.Printf("执行命令 %v 失败, 失败原因 %v", c, err)
+		}
+	}
+}
+
 var runCmd = &cobra.Command{
 	Use:   "run",
 	Short: "监听文件变化并执行 go run",
 	Long:  ``,
 	Run: func(cmd *cobra.Command, args []string) {
-
-		fmt.Println("gt!启动！")
+		log.Println("gt!启动！")
 
 		currentPath = getCurrentPath()
-		fmt.Println("监听目录:", currentPath)
+		log.Println("监听目录:", currentPath)
 
 		config = getConfig()
 
 		watcher, err := fsnotify.NewWatcher()
+
 		if err != nil {
 			log.Fatal(err)
 		}
+
 		defer watcher.Close()
 
-		var changeHandler = createDebounce[string](
-			func(name string) {
-				log.Println("文件变化:", name)
+		var changeHandler = createDebounce(
+			func(event fsnotify.Event) {
+				run()
 			},
-			1000*time.Millisecond,
+			2000*time.Millisecond,
 		)
 
 		// 开始监听
@@ -59,8 +82,15 @@ var runCmd = &cobra.Command{
 					if !ok {
 						return
 					}
-					log.Println("事件:", event)
-					changeHandler(event.Name)
+					// 忽略文件
+					ignoreFiles := slice.Map(config.IgnoreFiles, func(index int, item string) string {
+						p, _ := filepath.Abs(path.Join(currentPath, item))
+						return p
+					})
+
+					if !strutil.HasPrefixAny(event.Name, ignoreFiles) {
+						changeHandler(event)
+					}
 				case err, ok := <-watcher.Errors:
 					if !ok {
 						return
@@ -76,19 +106,22 @@ var runCmd = &cobra.Command{
 			log.Fatal(err)
 		}
 
+		run()
+
 		<-make(chan struct{})
 	},
 }
 
-func createDebounce[T any](handle func(T), duration time.Duration) func(T) {
-	var lastFire time.Time
+func createDebounce[T any](f func(v T), duration time.Duration) func(v T) {
+	var timer *time.Timer
+
 	return func(v T) {
-		now := time.Now()
-		if now.Sub(lastFire) < duration {
-			return
+		if timer != nil {
+			timer.Stop()
 		}
-		lastFire = now
-		handle(v)
+		timer = time.AfterFunc(duration, func() {
+			f(v)
+		})
 	}
 }
 
@@ -109,12 +142,10 @@ func getConfig() Config {
 	//判断文件是否存在
 	if err := viper.ReadInConfig(); err != nil {
 		return Config{
-			IgnoreDirs: []string{".git", ".idea"},
+			IgnoreDirs:  []string{".git", ".idea"},
+			IgnoreFiles: []string{},
+			Runs:        []string{},
 		}
-	}
-
-	if err := viper.ReadInConfig(); err != nil {
-		panic("配置文件不存在")
 	}
 
 	var conf Config
@@ -123,25 +154,6 @@ func getConfig() Config {
 	viper.WatchConfig()
 	log.Printf("配置信息: %+v\n", conf)
 	return conf
-}
-
-type Throttler struct {
-	maxRate int        // 最大调用频率，比如每秒最多调用多少次
-	last    time.Time  // 上次调用的时间
-	lock    sync.Mutex // 用于保护节流器的互斥锁
-}
-
-func (t *Throttler) Throttle(funcToCall func()) {
-	t.lock.Lock()
-	defer t.lock.Unlock()
-
-	now := time.Now()
-	elapsed := now.Sub(t.last) // 计算自上次调用以来的时间差
-	if elapsed < time.Second/time.Duration(t.maxRate) {
-		time.Sleep(time.Second/time.Duration(t.maxRate) - elapsed) // 等待一段时间再尝试
-	}
-	t.last = now // 更新上次调用时间
-	funcToCall() // 执行函数
 }
 
 func watchDir(watcher *fsnotify.Watcher, dir string) error {
