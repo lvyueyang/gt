@@ -1,4 +1,4 @@
-module gt
+module github.com/lvyueyang/gt
 
 go 1.20
 
