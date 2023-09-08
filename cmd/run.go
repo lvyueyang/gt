@@ -29,13 +29,13 @@ var (
 	config      Config
 )
 
-func run() {
+// 前置执行
+func runBefore() {
 	for _, c := range config.Runs {
 		if c == "" {
 			return
 		}
 		log.Println(color.Blue.Sprint("Run ", c))
-
 		args := strings.Split(c, " ")
 		cmd := exec.Command(args[0], args[1:]...)
 		cmd.Dir = currentPath
@@ -45,6 +45,45 @@ func run() {
 			log.Printf("执行命令 %v 失败, 失败原因 %v", c, err)
 		}
 	}
+}
+
+var runCommand *exec.Cmd
+
+func run() {
+	if runCommand != nil {
+		if err := runCommand.Process.Kill(); err != nil {
+			fmt.Printf("关闭失败 %+v", err)
+			panic(err)
+		}
+	}
+
+	//build := exec.Command("go", "build")
+	//build.Dir = currentPath
+	//build.Stdout = os.Stdout
+	//if err := build.Start(); err != nil {
+	//	fmt.Println("build 失败")
+	//	panic(err)
+	//} else {
+	//	fmt.Println("build 成功")
+	//}
+
+	fmt.Println("开使运行")
+	runCommand = exec.Command("go", "run", "main.go")
+	runCommand.Dir = currentPath
+	runCommand.Stdout = os.Stdout
+
+	if err := runCommand.Start(); err != nil {
+		fmt.Println("启动失败")
+		panic(err)
+	} else {
+		fmt.Println("启动成功", runCommand.Process.Pid)
+	}
+}
+
+func runHandler() {
+	runBefore()
+	fmt.Println("runHandler")
+	run()
 }
 
 var runCmd = &cobra.Command{
@@ -69,7 +108,7 @@ var runCmd = &cobra.Command{
 
 		var changeHandler = createDebounce(
 			func(event fsnotify.Event) {
-				run()
+				runHandler()
 			},
 			2000*time.Millisecond,
 		)
@@ -89,7 +128,11 @@ var runCmd = &cobra.Command{
 					})
 
 					if !strutil.HasPrefixAny(event.Name, ignoreFiles) {
-						changeHandler(event)
+						// 判断是否是一个文件路径
+						if isFile(event.Name) {
+							fmt.Println("文件发生变化: ", event.Name)
+							changeHandler(event)
+						}
 					}
 				case err, ok := <-watcher.Errors:
 					if !ok {
@@ -106,12 +149,13 @@ var runCmd = &cobra.Command{
 			log.Fatal(err)
 		}
 
-		run()
+		runHandler()
 
 		<-make(chan struct{})
 	},
 }
 
+// 创建一个防抖方法
 func createDebounce[T any](f func(v T), duration time.Duration) func(v T) {
 	var timer *time.Timer
 
@@ -125,6 +169,7 @@ func createDebounce[T any](f func(v T), duration time.Duration) func(v T) {
 	}
 }
 
+// 获取执行目录
 func getCurrentPath() string {
 	currentDirectory, err := os.Getwd()
 	if err != nil {
@@ -134,6 +179,7 @@ func getCurrentPath() string {
 	return currentDirectory
 }
 
+// 获取配置信息
 func getConfig() Config {
 	file, _ := filepath.Abs(path.Join(currentPath, "gtconfig.toml"))
 	viper.SetConfigFile(file)
@@ -150,7 +196,9 @@ func getConfig() Config {
 
 	var conf Config
 
-	viper.Unmarshal(&conf)
+	if err := viper.Unmarshal(&conf); err != nil {
+		fmt.Printf("配置映射失败 %+v", err)
+	}
 	viper.WatchConfig()
 	log.Printf("配置信息: %+v\n", conf)
 	return conf
@@ -161,6 +209,7 @@ func watchDir(watcher *fsnotify.Watcher, dir string) error {
 		p, _ := filepath.Abs(path.Join(dir, item))
 		return p
 	})
+	fmt.Println("IGNORE:", ignore)
 
 	// 遍历子目录
 	filepath.Walk(dir, func(p string, info os.FileInfo, err error) error {
@@ -182,24 +231,20 @@ func watchDir(watcher *fsnotify.Watcher, dir string) error {
 					log.Println("正在监听目录:", p)
 				}
 			}
-
 		}
-
 		return nil
 	})
 	return nil
 }
 
+func isFile(p string) bool {
+	info, err := os.Stat(p)
+	if err != nil {
+		return false
+	}
+	return !info.IsDir()
+}
+
 func init() {
 	rootCmd.AddCommand(runCmd)
-
-	// Here you will define your flags and configuration settings.
-
-	// Cobra supports Persistent Flags which will work for this command
-	// and all subcommands, e.g.:
-	// runCmd.PersistentFlags().String("foo", "", "A help for foo")
-
-	// Cobra supports local flags which will only run when this command
-	// is called directly, e.g.:
-	// runCmd.Flags().BoolP("toggle", "t", false, "Help message for toggle")
 }

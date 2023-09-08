@@ -1,6 +1,6 @@
 package main
 
-import "gt/cmd"
+import "github.com/lvyueyang/gt/cmd"
 
 func main() {
 	cmd.Execute()
